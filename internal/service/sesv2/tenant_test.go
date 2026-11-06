@@ -92,6 +92,46 @@ func TestAccSESV2Tenant_disappears(t *testing.T) {
 	})
 }
 
+func TestAccSESV2Tenant_reputationEntityPolicy(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := acctest.RandomWithPrefix(t, "tf-acc-test")
+	resourceName := "aws_sesv2_tenant.test"
+
+	acctest.ParallelTest(ctx, t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.SESV2ServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTenantDestroy(ctx, t),
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTenantConfig_reputationEntityPolicy(rName, "standard"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckTenantExists(ctx, t, resourceName),
+				),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("reputation_entity_policy"), knownvalue.StringRegexp(regexache.MustCompile(`:ses:[a-z0-9-]+:aws:reputation-policy/standard$`))),
+				},
+			},
+			{
+				ResourceName:                         resourceName,
+				ImportState:                          true,
+				ImportStateIdFunc:                    acctest.AttrImportStateIdFunc(resourceName, "tenant_name"),
+				ImportStateVerify:                    true,
+				ImportStateVerifyIdentifierAttribute: "tenant_name",
+			},
+			{
+				Config: testAccTenantConfig_reputationEntityPolicy(rName, "strict"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					testAccCheckTenantExists(ctx, t, resourceName),
+				),
+				ConfigStateChecks: []statecheck.StateCheck{
+					statecheck.ExpectKnownValue(resourceName, tfjsonpath.New("reputation_entity_policy"), knownvalue.StringRegexp(regexache.MustCompile(`:ses:[a-z0-9-]+:aws:reputation-policy/strict$`))),
+				},
+			},
+		},
+	})
+}
+
 func testAccCheckTenantDestroy(ctx context.Context, t *testing.T) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		conn := acctest.ProviderMeta(ctx, t).SESV2Client(ctx)
@@ -139,4 +179,18 @@ resource "aws_sesv2_tenant" "test" {
   tenant_name = %[1]q
 }
 `, rName)
+}
+
+func testAccTenantConfig_reputationEntityPolicy(rName, policy string) string {
+	return fmt.Sprintf(`
+data "aws_partition" "current" {}
+
+data "aws_region" "current" {}
+
+resource "aws_sesv2_tenant" "test" {
+  tenant_name = %[1]q
+
+  reputation_entity_policy = "arn:${data.aws_partition.current.partition}:ses:${data.aws_region.current.region}:aws:reputation-policy/%[2]s"
+}
+`, rName, policy)
 }

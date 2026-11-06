@@ -22,6 +22,7 @@ import (
 	"github.com/hashicorp/terraform-provider-aws/internal/errs/fwdiag"
 	"github.com/hashicorp/terraform-provider-aws/internal/framework"
 	fwflex "github.com/hashicorp/terraform-provider-aws/internal/framework/flex"
+	fwtypes "github.com/hashicorp/terraform-provider-aws/internal/framework/types"
 	"github.com/hashicorp/terraform-provider-aws/internal/retry"
 	"github.com/hashicorp/terraform-provider-aws/internal/smerr"
 	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
@@ -44,6 +45,14 @@ type tenantResource struct {
 func (r *tenantResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Attributes: map[string]schema.Attribute{
+			"reputation_entity_policy": schema.StringAttribute{
+				CustomType: fwtypes.ARNType,
+				Optional:   true,
+				Computed:   true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
+			},
 			"sending_status": schema.StringAttribute{
 				Computed: true,
 				PlanModifiers: []planmodifier.String{
@@ -90,6 +99,24 @@ func (r *tenantResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
+	// The reputation management policy is managed through the separate reputation
+	// entity API, keyed by the tenant ARN. Apply it only when the user configured it.
+	if !plan.ReputationEntityPolicy.IsNull() {
+		arn := fwflex.StringValueFromFramework(ctx, plan.TenantARN)
+		if err := putTenantReputationEntityPolicy(ctx, conn, arn, fwflex.StringValueFromFramework(ctx, plan.ReputationEntityPolicy)); err != nil {
+			smerr.AddError(ctx, &resp.Diagnostics, err, smerr.ID, name)
+			return
+		}
+	}
+
+	// Read the applied policy back so the computed value reflects AWS state.
+	policy, err := findReputationEntityPolicyByReference(ctx, conn, fwflex.StringValueFromFramework(ctx, plan.TenantARN))
+	if err != nil {
+		smerr.AddError(ctx, &resp.Diagnostics, err, smerr.ID, name)
+		return
+	}
+	plan.ReputationEntityPolicy = fwflex.StringToFrameworkARN(ctx, policy)
+
 	smerr.AddEnrich(ctx, &resp.Diagnostics, resp.State.Set(ctx, &plan))
 }
 
@@ -119,9 +146,46 @@ func (r *tenantResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
+	policy, err := findReputationEntityPolicyByReference(ctx, conn, fwflex.StringValueFromFramework(ctx, state.TenantARN))
+	if err != nil {
+		smerr.AddError(ctx, &resp.Diagnostics, err, smerr.ID, name)
+		return
+	}
+	state.ReputationEntityPolicy = fwflex.StringToFrameworkARN(ctx, policy)
+
 	setTagsOut(ctx, out.Tags)
 
 	smerr.AddEnrich(ctx, &resp.Diagnostics, resp.State.Set(ctx, &state))
+}
+
+func (r *tenantResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan, state tenantResourceModel
+	smerr.AddEnrich(ctx, &resp.Diagnostics, req.Plan.Get(ctx, &plan))
+	smerr.AddEnrich(ctx, &resp.Diagnostics, req.State.Get(ctx, &state))
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	conn := r.Meta().SESV2Client(ctx)
+
+	name := fwflex.StringValueFromFramework(ctx, plan.TenantName)
+	arn := fwflex.StringValueFromFramework(ctx, state.TenantARN)
+
+	if !plan.ReputationEntityPolicy.Equal(state.ReputationEntityPolicy) {
+		if err := putTenantReputationEntityPolicy(ctx, conn, arn, fwflex.StringValueFromFramework(ctx, plan.ReputationEntityPolicy)); err != nil {
+			smerr.AddError(ctx, &resp.Diagnostics, err, smerr.ID, name)
+			return
+		}
+	}
+
+	policy, err := findReputationEntityPolicyByReference(ctx, conn, arn)
+	if err != nil {
+		smerr.AddError(ctx, &resp.Diagnostics, err, smerr.ID, name)
+		return
+	}
+	plan.ReputationEntityPolicy = fwflex.StringToFrameworkARN(ctx, policy)
+
+	smerr.AddEnrich(ctx, &resp.Diagnostics, resp.State.Set(ctx, &plan))
 }
 
 func (r *tenantResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -181,12 +245,53 @@ func findTenant(ctx context.Context, conn *sesv2.Client, input *sesv2.GetTenantI
 	return out.Tenant, nil
 }
 
+// putTenantReputationEntityPolicy applies an SES-managed reputation management
+// policy to a tenant. A tenant is a RESOURCE-type reputation entity referenced by
+// its ARN.
+func putTenantReputationEntityPolicy(ctx context.Context, conn *sesv2.Client, tenantARN, policyARN string) error {
+	input := sesv2.UpdateReputationEntityPolicyInput{
+		ReputationEntityPolicy:    aws.String(policyARN),
+		ReputationEntityReference: aws.String(tenantARN),
+		ReputationEntityType:      awstypes.ReputationEntityTypeResource,
+	}
+
+	_, err := conn.UpdateReputationEntityPolicy(ctx, &input)
+
+	return err
+}
+
+func findReputationEntityPolicyByReference(ctx context.Context, conn *sesv2.Client, reference string) (*string, error) {
+	input := sesv2.GetReputationEntityInput{
+		ReputationEntityReference: aws.String(reference),
+		ReputationEntityType:      awstypes.ReputationEntityTypeResource,
+	}
+
+	out, err := conn.GetReputationEntity(ctx, &input)
+
+	if errs.IsA[*awstypes.NotFoundException](err) {
+		return nil, &retry.NotFoundError{
+			LastError: err,
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	if out == nil || out.ReputationEntity == nil {
+		return nil, tfresource.NewEmptyResultError()
+	}
+
+	return out.ReputationEntity.ReputationManagementPolicy, nil
+}
+
 type tenantResourceModel struct {
 	framework.WithRegionModel
-	SendingStatus types.String `tfsdk:"sending_status"`
-	Tags          tftags.Map   `tfsdk:"tags"`
-	TagsAll       tftags.Map   `tfsdk:"tags_all"`
-	TenantARN     types.String `tfsdk:"tenant_arn"`
-	TenantID      types.String `tfsdk:"tenant_id"`
-	TenantName    types.String `tfsdk:"tenant_name"`
+	ReputationEntityPolicy fwtypes.ARN  `tfsdk:"reputation_entity_policy"`
+	SendingStatus          types.String `tfsdk:"sending_status"`
+	Tags                   tftags.Map   `tfsdk:"tags"`
+	TagsAll                tftags.Map   `tfsdk:"tags_all"`
+	TenantARN              types.String `tfsdk:"tenant_arn"`
+	TenantID               types.String `tfsdk:"tenant_id"`
+	TenantName             types.String `tfsdk:"tenant_name"`
 }
