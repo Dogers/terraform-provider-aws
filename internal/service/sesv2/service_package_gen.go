@@ -51,6 +51,12 @@ func (p *servicePackage) FrameworkResources(ctx context.Context) []*inttypes.Ser
 			Name:     "Tenant Resource Association",
 			Region:   inttypes.ResourceRegionDefault(),
 		},
+		{
+			Factory:  newTenantSuppressionAttributesResource,
+			TypeName: "aws_sesv2_tenant_suppression_attributes",
+			Name:     "Tenant Suppression Attributes",
+			Region:   inttypes.ResourceRegionDefault(),
+		},
 	}
 }
 
