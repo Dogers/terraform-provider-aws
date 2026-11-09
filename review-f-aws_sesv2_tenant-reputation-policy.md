@@ -74,6 +74,21 @@ With Optional+Computed+`UseStateForUnknown`, removing `reputation_entity_policy`
 - Tag updates still work: `ResourceWithModel` embeds `withNoOpUpdate`, and tags are handled by the transparent tagging interceptor, not the resource's `Update` — so overriding `Update` here doesn't break tag-only updates.
 - `fwflex.StringToFrameworkARN(ctx, nil)` safely produces a null ARN if AWS ever returns a nil policy.
 
+## Re-check (commit `27d137ea486` — "address review feedback")
+
+Verified: `go build` and `go vet` pass on `internal/service/sesv2`.
+
+| Finding | Status |
+|---|---|
+| 1. Read/Create hard-error on missing reputation entity | **Resolved.** `Read` now drifts to `fwtypes.ARNNull()` on `retry.NotFound`; `Create` wraps the read-back in `tfresource.RetryWhenNotFound(ctx, 1*time.Minute, ...)` (signature verified against `internal/tfresource/retry.go`). |
+| 2. Missing CHANGELOG entry | **Still outstanding.** No `.changelog/` file on the branch. |
+| 3. Duplicate Attribute Reference doc entry | **Resolved.** Removed; the "removing this argument does not reset the policy; set the `none` policy ARN" note was added to the argument doc (also covers finding 5). |
+| 4. Unused finder export | **Resolved.** New `testAccCheckTenantReputationEntityPolicy` check verifies the applied policy via `FindReputationEntityPolicyByReference` in both the create and update steps. |
+| 5. No way to unset (doc note) | **Resolved** via the finding-3 doc wording. |
+| Nit: Update always re-fetches | **Resolved.** The put + read-back now only run inside the `!plan.ReputationEntityPolicy.Equal(state.ReputationEntityPolicy)` gate; tags-only updates skip the reputation API entirely. |
+
+No new issues found in the follow-up commit. The `Update` change is safe because refresh (`Read`) runs before update, so the plan/state comparison already reflects any out-of-band drift.
+
 ## Design discussion
 
 ### Should this be a separate resource?

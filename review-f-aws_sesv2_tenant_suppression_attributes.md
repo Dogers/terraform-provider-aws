@@ -73,6 +73,21 @@ Create and Update call `findTenantByName` and flatten `out.SuppressionAttributes
 - Docs: frontmatter/description opens with "Manages", required-then-optional argument structure, valid values listed, no forbidden description openings.
 - Enum types (`fwtypes.SetOfStringEnumType`, `fwtypes.StringEnumType`) match SDK enums; test configs use the correct uppercase values.
 
+## Re-check (commit `d5478aeab46` — "address review feedback")
+
+Verified: `go build` and `go vet` pass on `internal/service/sesv2`.
+
+| Finding | Status |
+|---|---|
+| 1. Missing resource identity | **Resolved.** `@IdentityAttribute("tenant_name")` + `framework.WithImportByIdentity` replace the hand-rolled `ImportState`; `service_package_gen.go` shows the matching `RegionalSingleParameterIdentity`; generated identity tests (`tenant_suppression_attributes_identity_gen_test.go`) and testdata templates are present and look standard. Docs have the full identity import structure (v1.12.0 identity block → Identity Schema with Required `tenant_name` and the verbatim `account_id`/`region` Optional bullets → v1.5.0 import block → `terraform import`). |
+| 2. `suppressed_reasons` Optional-only | **Resolved.** Now Optional+Computed with `setplanmodifier.UseStateForUnknown()`. The scope interaction is documented on the argument ("Only meaningful when `suppression_scope` is `TENANT`"). |
+| 3. Missing `_disappears` test | **Resolved.** `TestAccSESV2TenantSuppressionAttributes_disappears_tenant` deletes the parent tenant via `acctest.CheckFrameworkResourceDisappears(ctx, t, tfsesv2.ResourceTenant, ...)` with `ExpectNonEmptyPlan`. |
+| 4. Missing CHANGELOG entry | **Still outstanding.** No `.changelog/` file on the branch. |
+| 5. Create/Update read-back bypasses finder | **Resolved.** Both now use `findTenantSuppressionAttributesByName` and flatten its result directly. |
+| Nit: plan check on `_basic` | **Resolved.** `plancheck.ExpectResourceAction(resourceName, plancheck.ResourceActionCreate)` added. |
+
+No new issues found in the follow-up commit. `testAccCheckTenantSuppressionAttributesDestroy` (added in this commit) is wired up as the `CheckDestroy` for the generated identity tests; the hand-written tests keep `acctest.CheckDestroyNoop`, which is consistent with the NoOp delete.
+
 ## Cross-branch note
 
 Both branches (`f-aws_sesv2_tenant-reputation-policy` and this one) touch `internal/service/sesv2/exports_test.go` in the same var block — expect a trivial merge conflict whichever lands second.
